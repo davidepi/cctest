@@ -1,0 +1,8 @@
+[package]
+name = "ccfinder-ng"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+sha2 = "0.10"
+curl = "0.4"
