@@ -41,15 +41,31 @@ fn main() -> Result<(), IOError> {
         ANTLR_PARSER_GENERATOR_HASH,
         &antlr_dir,
     )?;
-    download_grammars("grammars/grammars.toml", &downloaded_dir)?;
-    run_parser_generator(antlr_dir, downloaded_dir, generated_dir)?;
+    download_and_generate_grammars(
+        "grammars/grammars.toml",
+        &antlr_dir,
+        &downloaded_dir,
+        &generated_dir,
+    )?;
     Ok(())
 }
 
 /// Reads the content of a file (`list`) and downloads the grammars listed there
-fn download_grammars<P: AsRef<Path>>(list: &str, outdir: P) -> Result<(), IOError> {
+/// Then runs the parser generator for each of them
+fn download_and_generate_grammars<P: AsRef<Path>>(
+    list: &str,
+    antlr_dir: P,
+    downloaded_dir: P,
+    generated_dir: P,
+) -> Result<(), IOError> {
     let list_content = std::fs::read_to_string(list)?;
     let toml: HashMap<String, GrammarDownload> = toml::from_str(&list_content)?;
+    let antlr_filename = Path::new(&ANTLR_PARSER_GENERATOR_URL)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let antlr_path = PathBuf::from(antlr_dir.as_ref()).join(antlr_filename);
     for (key, value) in toml {
         assert_eq!(
             value.url.len(),
@@ -57,54 +73,24 @@ fn download_grammars<P: AsRef<Path>>(list: &str, outdir: P) -> Result<(), IOErro
             "The amount of URLs and SHA-256 for {} is different",
             key
         );
-        let langdir = PathBuf::from(outdir.as_ref()).join(key);
-        std::fs::create_dir_all(&langdir)?;
+        let downloaded_langdir = PathBuf::from(downloaded_dir.as_ref()).join(&key);
+        let generated_langdir = PathBuf::from(generated_dir.as_ref()).join(&key);
+        std::fs::create_dir_all(&generated_langdir)?;
         for (url, sha256) in value.url.iter().zip(value.sha256.iter()) {
-            download_file(url, sha256, &langdir)?;
-        }
-    }
-    Ok(())
-}
-
-/// Runs the ANTLR parser generator for each grammar inside downloaded_dir/<lang>/<files.g4> and
-/// generates the Rust target at generated_dir/<lang>/<files>
-fn run_parser_generator<P: AsRef<Path>>(
-    antlr_dir: P,
-    downloaded_dir: P,
-    generated_dir: P,
-) -> Result<(), IOError> {
-    let antlr_filename = Path::new(&ANTLR_PARSER_GENERATOR_URL)
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap();
-    let antlr_path = PathBuf::from(antlr_dir.as_ref()).join(antlr_filename);
-    let entries = std::fs::read_dir(downloaded_dir)?;
-    for entry in entries {
-        let path = entry?.path(); // i.e. downloaded_dir/java
-        if path.is_dir() {
-            let outdir = PathBuf::from(generated_dir.as_ref()).join(path.file_name().unwrap());
-            std::fs::create_dir_all(&outdir)?;
-            let grammar_entries = std::fs::read_dir(path)?;
-            for grammar_entry in grammar_entries {
-                let grammar_path = grammar_entry?.path(); // i.e. downloaded_dir/java/Lexer.g4
-                if grammar_path.is_file() {
-                    if let Some(extension) = grammar_path.extension() {
-                        if extension.to_str().unwrap() == "g4" {
-                            Command::new("java")
-                                .arg("-cp")
-                                .arg(&antlr_path)
-                                .arg("org.antlr.v4.Tool")
-                                .arg("-Dlanguage=Rust")
-                                .arg("-o")
-                                .arg(&outdir)
-                                .arg(grammar_path)
-                                .spawn()?
-                                .wait_with_output()?;
-                        }
-                    }
-                }
-            }
+            download_file(url, sha256, &downloaded_langdir)?;
+            let filename = Path::new(&url).file_name().unwrap().to_str().unwrap();
+            let downloaded_file = downloaded_langdir.join(filename);
+            Command::new("java")
+                .current_dir(&generated_langdir)
+                .arg("-cp")
+                .arg(&antlr_path)
+                .arg("org.antlr.v4.Tool")
+                .arg("-Dlanguage=Rust")
+                .arg("-o")
+                .arg(&generated_langdir)
+                .arg(downloaded_file)
+                .spawn()?
+                .wait_with_output()?;
         }
     }
     Ok(())
