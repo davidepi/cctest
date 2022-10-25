@@ -9,44 +9,30 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
-use std::io::{Error as IOError, ErrorKind, Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-const ANTLR_PARSER_GENERATOR_URL: &str = "https://github.com/rrevenantt/antlr4rust/releases/download/antlr4-4.8-2-Rust0.3.0-beta/antlr4-4.8-2-SNAPSHOT-complete.jar";
-const ANTLR_PARSER_GENERATOR_HASH: &str =
-    "d23d7b0006f7477243d2d85c54632baa1932a5e05588e0c2548dbe3dd69f4637";
+use wisent::error::ParseError;
+use wisent::grammar::Grammar;
+use wisent::lexer::Dfa;
 
 #[derive(Deserialize)]
 struct GrammarDownload {
-    url: Vec<String>,
-    sha256: Vec<String>,
+    url: String,
+    sha256: String,
 }
 
-fn main() -> Result<(), IOError> {
-    println!("cargo:rerun-if-changed=grammars/grammars.toml");
+fn main() -> Result<(), BuildScriptError> {
+    println!("cargo:rerun-if-changed=grammars.toml");
     let outdir = env::var_os("OUT_DIR")
         .unwrap()
         .to_str()
         .unwrap()
         .to_string();
-    let antlr_dir = Path::new(&outdir).join("antlr");
     let downloaded_dir = Path::new(&outdir).join("downloaded");
     let generated_dir = Path::new(&outdir).join("generated");
-    std::fs::create_dir_all(&antlr_dir)?;
     std::fs::create_dir_all(&downloaded_dir)?;
     std::fs::create_dir_all(&generated_dir)?;
-    download_file(
-        ANTLR_PARSER_GENERATOR_URL,
-        ANTLR_PARSER_GENERATOR_HASH,
-        &antlr_dir,
-    )?;
-    download_and_generate_grammars(
-        "grammars/grammars.toml",
-        &antlr_dir,
-        &downloaded_dir,
-        &generated_dir,
-    )?;
+    download_and_generate_grammars("grammars.toml", &downloaded_dir, &generated_dir)?;
     Ok(())
 }
 
@@ -54,50 +40,31 @@ fn main() -> Result<(), IOError> {
 /// Then runs the parser generator for each of them
 fn download_and_generate_grammars<P: AsRef<Path>>(
     list: &str,
-    antlr_dir: P,
     downloaded_dir: P,
     generated_dir: P,
-) -> Result<(), IOError> {
+) -> Result<(), BuildScriptError> {
     let list_content = std::fs::read_to_string(list)?;
     let toml: HashMap<String, GrammarDownload> = toml::from_str(&list_content)?;
-    let antlr_filename = Path::new(&ANTLR_PARSER_GENERATOR_URL)
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap();
-    let antlr_path = PathBuf::from(antlr_dir.as_ref()).join(antlr_filename);
     for (key, value) in toml {
-        assert_eq!(
-            value.url.len(),
-            value.sha256.len(),
-            "The amount of URLs and SHA-256 for {} is different",
-            key
-        );
         let downloaded_langdir = PathBuf::from(downloaded_dir.as_ref()).join(&key);
         let generated_langdir = PathBuf::from(generated_dir.as_ref()).join(&key);
         std::fs::create_dir_all(&generated_langdir)?;
-        for (url, sha256) in value.url.iter().zip(value.sha256.iter()) {
-            download_file(url, sha256, &downloaded_langdir)?;
-            let filename = Path::new(&url).file_name().unwrap().to_str().unwrap();
-            let downloaded_file = downloaded_langdir.join(filename);
-            Command::new("java")
-                .current_dir(&generated_langdir)
-                .arg("-cp")
-                .arg(&antlr_path)
-                .arg("org.antlr.v4.Tool")
-                .arg("-Dlanguage=Rust")
-                .arg("-o")
-                .arg(&generated_langdir)
-                .arg(downloaded_file)
-                .spawn()?
-                .wait_with_output()?;
-        }
+        download_file(&value.url, &value.sha256, &downloaded_langdir)?;
+        let filename = Path::new(&value.url).file_name().unwrap().to_str().unwrap();
+        let filestem = Path::new(&value.url).file_stem().unwrap().to_str().unwrap();
+        let downloaded_file = downloaded_langdir.join(filename);
+        let generated_file = generated_langdir.join(format!("{}.dfa", filestem));
+        let grammar =
+            Grammar::parse_grammar(downloaded_file.as_path().as_os_str().to_str().unwrap())?;
+        let dfa = Dfa::new(&grammar);
+        let encoded_dfa = dfa.as_bytes();
+        std::fs::write(generated_file, encoded_dfa)?;
     }
     Ok(())
 }
 
 /// Downloads a file from the web, and asserts the sha256 is the expected one.
-fn download_file<P: AsRef<Path>>(url: &str, sha256: &str, dir: P) -> Result<(), IOError> {
+fn download_file<P: AsRef<Path>>(url: &str, sha256: &str, dir: P) -> Result<(), std::io::Error> {
     // creates the folder if not existing, extract filename
     std::fs::create_dir_all(&dir)?;
     let filename = Path::new(&url).file_name().unwrap().to_str().unwrap();
@@ -138,9 +105,34 @@ fn download_file<P: AsRef<Path>>(url: &str, sha256: &str, dir: P) -> Result<(), 
         let mut file = File::create(file_path)?;
         file.write_all(&data)
     } else {
-        Err(IOError::new(
+        Err(std::io::Error::new(
             ErrorKind::InvalidData,
             "Downloaded file with wrong SHA-256",
         ))
+    }
+}
+
+#[derive(Debug)]
+enum BuildScriptError {
+    Parse(ParseError),
+    Toml(toml::de::Error),
+    Io(std::io::Error),
+}
+
+impl From<ParseError> for BuildScriptError {
+    fn from(err: ParseError) -> Self {
+        BuildScriptError::Parse(err)
+    }
+}
+
+impl From<std::io::Error> for BuildScriptError {
+    fn from(err: std::io::Error) -> Self {
+        BuildScriptError::Io(err)
+    }
+}
+
+impl From<toml::de::Error> for BuildScriptError {
+    fn from(err: toml::de::Error) -> Self {
+        BuildScriptError::Toml(err)
     }
 }

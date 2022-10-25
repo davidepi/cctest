@@ -1,0 +1,7 @@
+[c]
+url = "https://raw.githubusercontent.com/antlr/grammars-v4/8c915dc8b85abde9525ebc1087b1ae6458d31615/c/C.g4"
+sha256 = "6857d5c744cf26f984826bba29986c1bd3d3dfd39d250da1a8f9c19b6a3a9b02"
+
+[cpp]
+url = "https://raw.githubusercontent.com/antlr/grammars-v4/8c915dc8b85abde9525ebc1087b1ae6458d31615/cpp/CPP14Lexer.g4"
+sha256 = "9a51b7236592d37ee2fd89d3df0b721889c0511723b89423aa698cc3531fd178"
