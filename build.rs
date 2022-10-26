@@ -19,6 +19,7 @@ use wisent::lexer::Dfa;
 struct GrammarDownload {
     url: String,
     sha256: String,
+    extensions: Vec<String>,
 }
 
 fn main() -> Result<(), BuildScriptError> {
@@ -30,21 +31,57 @@ fn main() -> Result<(), BuildScriptError> {
         .to_string();
     let downloaded_dir = Path::new(&outdir).join("downloaded");
     let generated_dir = Path::new(&outdir).join("generated");
+    let output_rust_file = Path::new(&outdir).join("assign_grammars.in");
     std::fs::create_dir_all(&downloaded_dir)?;
     std::fs::create_dir_all(&generated_dir)?;
-    download_and_generate_grammars("grammars.toml", &downloaded_dir, &generated_dir)?;
+    let dfa_map = download_and_generate_grammars("grammars.toml", &downloaded_dir, &generated_dir)?;
+    print_grammar_assignment(dfa_map, output_rust_file)?;
+    Ok(())
+}
+
+/// Prints a file matching the extensions to the generated grammar
+fn print_grammar_assignment<P: AsRef<Path>>(
+    dfa_map: HashMap<String, String>,
+    output: P,
+) -> Result<(), BuildScriptError> {
+    let mut f = File::create(output)?;
+    writeln!(
+        f,
+        "/// Returns a vector of bytes containing the lexer DFA implementation, given"
+    )?;
+    writeln!(f, "/// the file extension.")?;
+    writeln!(f, "fn assign_dfas(extension: &str) {{")?;
+    writeln!(f, "    match extension {{")?;
+    for (extension, dfa_bytes) in dfa_map.into_iter() {
+        if extension.chars().all(|x| x.is_alphanumeric()) {
+            writeln!(
+                f,
+                "        \"{}\" => include_bytes!(\"{}\"),",
+                extension, dfa_bytes
+            )?;
+        } else {
+            Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("non alphanumeric extension '{}'", extension),
+            ))?
+        }
+    }
+    writeln!(f, "        _ => Vec::new(),")?;
+    write!(f, "    }}\n}}\n")?;
     Ok(())
 }
 
 /// Reads the content of a file (`list`) and downloads the grammars listed there
 /// Then runs the parser generator for each of them
+/// returns the pair (extension, parser_to_use)
 fn download_and_generate_grammars<P: AsRef<Path>>(
     list: &str,
     downloaded_dir: P,
     generated_dir: P,
-) -> Result<(), BuildScriptError> {
+) -> Result<HashMap<String, String>, BuildScriptError> {
     let list_content = std::fs::read_to_string(list)?;
     let toml: HashMap<String, GrammarDownload> = toml::from_str(&list_content)?;
+    let mut parsers = HashMap::new();
     for (key, value) in toml {
         let downloaded_langdir = PathBuf::from(downloaded_dir.as_ref()).join(&key);
         let generated_langdir = PathBuf::from(generated_dir.as_ref()).join(&key);
@@ -54,13 +91,18 @@ fn download_and_generate_grammars<P: AsRef<Path>>(
         let filestem = Path::new(&value.url).file_stem().unwrap().to_str().unwrap();
         let downloaded_file = downloaded_langdir.join(filename);
         let generated_file = generated_langdir.join(format!("{}.dfa", filestem));
-        let grammar =
-            Grammar::parse_grammar(downloaded_file.as_path().as_os_str().to_str().unwrap())?;
+        let grammar = Grammar::parse_grammar(downloaded_file.as_path().to_str().unwrap())?;
         let dfa = Dfa::new(&grammar);
         let encoded_dfa = dfa.as_bytes();
-        std::fs::write(generated_file, encoded_dfa)?;
+        std::fs::write(generated_file.as_path(), encoded_dfa)?;
+        for extension in value.extensions {
+            parsers.insert(
+                extension,
+                generated_file.as_path().to_str().unwrap().to_string(),
+            );
+        }
     }
-    Ok(())
+    Ok(parsers)
 }
 
 /// Downloads a file from the web, and asserts the sha256 is the expected one.
